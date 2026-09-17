@@ -229,6 +229,7 @@ impl Renderer {
 
         let island = if config.navigation.is_enabled() {
             Some(island::Island::new(
+                config.island.clone(),
                 named_colors.tabs,
                 named_colors.tabs_active,
                 config.navigation.hide_if_single,

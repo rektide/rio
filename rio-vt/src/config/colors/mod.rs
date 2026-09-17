@@ -683,6 +683,26 @@ where
     }
 }
 
+/// Deserialize a list of hex color strings (e.g. a palette of
+/// swatches) into `Vec<ColorArray>`, erroring on the first invalid
+/// entry — same contract as `deserialize_to_arr`.
+pub fn deserialize_to_arr_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ColorArray>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    let strs = Vec::<String>::deserialize(deserializer)?;
+    let mut colors = Vec::with_capacity(strs.len());
+    for s in strs {
+        match ColorBuilder::from_hex(s, Format::SRGB0_1) {
+            Ok(color) => colors.push(color.to_arr()),
+            Err(e) => return Err(serde::de::Error::custom(e)),
+        }
+    }
+    Ok(colors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,6 +7,7 @@ use rio_window::window::Theme;
 #[inline]
 pub fn padding_top_from_config(
     navigation: &Navigation,
+    island_height: f32,
     padding_y_top: f32,
     #[allow(unused)] num_tabs: usize,
     #[allow(unused)] macos_use_unified_titlebar: bool,
@@ -20,8 +21,7 @@ pub fn padding_top_from_config(
             return constants::PADDING_Y + padding_y_top;
         }
 
-        use crate::renderer::island::ISLAND_HEIGHT;
-        return ISLAND_HEIGHT + padding_y_top;
+        return island_height + padding_y_top;
     }
 
     let default_padding = constants::PADDING_Y + padding_y_top;

@@ -6,6 +6,7 @@ pub use rio_vt::config::{colors, ConfigError};
 pub mod defaults;
 pub mod effects;
 pub mod hints;
+pub mod island;
 pub mod keyboard;
 pub mod layout;
 pub mod navigation;
@@ -20,6 +21,7 @@ use crate::config::bell::Bell;
 use crate::config::bindings::Bindings;
 use crate::config::defaults::*;
 use crate::config::hints::Hints;
+use crate::config::island::IslandConfig;
 use crate::config::keyboard::Keyboard;
 use crate::config::layout::{Margin, Panel};
 use crate::config::navigation::Navigation;
@@ -102,6 +104,8 @@ pub struct Config {
     pub cursor: CursorConfig,
     #[serde(default = "Navigation::default")]
     pub navigation: Navigation,
+    #[serde(default)]
+    pub island: IslandConfig,
     #[serde(default = "Window::default")]
     pub window: Window,
     #[serde(default = "default_shell")]
@@ -301,8 +305,10 @@ impl Config {
     fn load_from_path(path: &PathBuf) -> Self {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
-            let decoded: Config =
+            let mut decoded: Config =
                 toml::from_str(&content).unwrap_or_else(|_| Config::default());
+            // Decode must never yield unclamped island geometry.
+            decoded.island.sanitize();
             decoded
         } else {
             Config::default()
@@ -314,6 +320,9 @@ impl Config {
             let content = std::fs::read_to_string(path).unwrap();
             match toml::from_str::<Config>(&content) {
                 Ok(mut decoded) => {
+                    // Match try_load: decode always yields clamped
+                    // island geometry.
+                    decoded.island.sanitize();
                     let theme = &decoded.theme;
                     if theme.is_empty() {
                         return Ok(decoded);
@@ -388,6 +397,11 @@ impl Config {
             let content = std::fs::read_to_string(path).unwrap();
             match toml::from_str::<Config>(&content) {
                 Ok(mut decoded) => {
+                    // Decode must never yield unclamped island
+                    // geometry: `load` is library API that callers may
+                    // use without the startup platform merge (which
+                    // re-sanitizes after overwrites).
+                    decoded.island.sanitize();
                     let theme = &decoded.theme;
                     if theme.is_empty() {
                         return decoded;
@@ -421,6 +435,9 @@ impl Config {
             match std::fs::read_to_string(path) {
                 Ok(content) => match toml::from_str::<Config>(&content) {
                     Ok(mut decoded) => {
+                        // Keep the live-reload path clamped identically
+                        // to the startup path.
+                        decoded.island.sanitize();
                         let theme = &decoded.theme;
                         let theme_path = config_dir_path().join("themes");
                         if !theme.is_empty() {
@@ -510,6 +527,11 @@ impl Config {
         if let Some(macos) = &self.platform.macos {
             self.overwrite_with_platform_config(macos.clone());
         }
+
+        // Island geometry clamps run on every load (not only when a
+        // platform section exists): a degenerate value breaks the tab
+        // strip layout, not just its look.
+        self.island.sanitize();
     }
 
     fn overwrite_with_platform_config(&mut self, platform_config: PlatformConfig) {
@@ -675,6 +697,7 @@ impl Default for Config {
             fonts: SugarloafFonts::default(),
             line_height: default_line_height(),
             navigation: Navigation::default(),
+            island: IslandConfig::default(),
             option_as_alt: default_option_as_alt(),
             margin: default_margin(),
             panel: Panel::default(),

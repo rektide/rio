@@ -26,7 +26,7 @@ use crate::crosswords::{
 use crate::hints::HintState;
 use crate::layout::ContextDimension;
 use crate::mouse::{calculate_mouse_position, Mouse};
-use crate::renderer::island::{self, TabStripLayout, ISLAND_HEIGHT};
+use crate::renderer::island::{self, TabStripLayout};
 use crate::renderer::{utils::padding_top_from_config, Renderer};
 use crate::screen::hint::HintMatches;
 use crate::selection::{Selection, SelectionType};
@@ -151,6 +151,7 @@ impl Screen<'_> {
 
         let padding_y_top = padding_top_from_config(
             &config.navigation,
+            config.island.height,
             config.margin.top,
             1,
             config.window.macos_use_unified_titlebar,
@@ -520,6 +521,7 @@ impl Screen<'_> {
         let num_tabs = self.ctx().len();
         let padding_y_top = padding_top_from_config(
             &config.navigation,
+            config.island.height,
             config.margin.top,
             num_tabs,
             config.window.macos_use_unified_titlebar,
@@ -557,6 +559,7 @@ impl Screen<'_> {
         if let Some(mut island) = old_island {
             island.update_colors(config.colors.tabs, config.colors.tabs_active);
             island.max_tab_width = config.navigation.max_tab_width;
+            island.config = config.island.clone();
             self.renderer.island = Some(island);
         }
 
@@ -1776,6 +1779,7 @@ impl Screen<'_> {
     pub fn resize_top_or_bottom_line(&mut self, num_tabs: usize) {
         let padding_y_top = padding_top_from_config(
             &self.renderer.navigation,
+            self.island_height(),
             self.renderer.margin.top,
             num_tabs,
             self.renderer.macos_use_unified_titlebar,
@@ -2820,20 +2824,33 @@ impl Screen<'_> {
             .is_some()
     }
 
+    /// Height of the tab strip in logical pixels: the island's
+    /// configured `[island]` height when present, else the default
+    /// geometry (Plain navigation draws no strip; the value keeps
+    /// band math and unit tests well-defined).
     #[inline]
-    fn island_tab_layout(&self, num_tabs: usize) -> TabStripLayout {
-        let max_tab_width = self
-            .renderer
+    pub fn island_height(&self) -> f32 {
+        self.renderer
             .island
             .as_ref()
-            .map(|island| island.max_tab_width)
-            .unwrap_or_else(rio_backend::config::navigation::default_max_tab_width);
-        island::tab_strip_layout(
-            self.sugarloaf.window_size().width,
-            self.sugarloaf.scale_factor(),
-            num_tabs,
-            max_tab_width,
-        )
+            .map(|island| island.config.height)
+            .unwrap_or(rio_backend::config::island::default_height())
+    }
+
+    #[inline]
+    fn island_tab_layout(&self, num_tabs: usize) -> TabStripLayout {
+        let width = self.sugarloaf.window_size().width;
+        let scale = self.sugarloaf.scale_factor();
+        match self.renderer.island.as_ref() {
+            Some(island) => island.layout(width, scale, num_tabs),
+            None => island::tab_strip_layout(
+                &rio_backend::config::island::IslandConfig::default(),
+                width,
+                scale,
+                num_tabs,
+                rio_backend::config::navigation::default_max_tab_width(),
+            ),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2897,12 +2914,14 @@ impl Screen<'_> {
 
         let hovering = num_tabs > 1
             && self.renderer.navigation.island_visible(num_tabs)
-            && mouse_y <= (ISLAND_HEIGHT * scale_factor) as f64
-            && island::close_button_hit(
-                &self.island_tab_layout(num_tabs),
-                self.context_manager.current_index(),
-                mouse_x as f32 / scale_factor,
-            );
+            && self.renderer.island.as_ref().is_some_and(|island| {
+                mouse_y <= (island.config.height * scale_factor) as f64
+                    && island.close_hit(
+                        &self.island_tab_layout(num_tabs),
+                        self.context_manager.current_index(),
+                        mouse_x as f32 / scale_factor,
+                    )
+            });
 
         self.apply_close_hover(hovering)
     }
@@ -2928,7 +2947,7 @@ impl Screen<'_> {
         let mouse_y = self.mouse.y;
 
         let scale_factor = self.sugarloaf.scale_factor();
-        let island_height_px = (ISLAND_HEIGHT * scale_factor) as f64;
+        let island_height_px = (self.island_height() * scale_factor) as f64;
 
         let window_width = self.sugarloaf.window_size().width;
         let num_tabs = self.context_manager.len();
@@ -2999,11 +3018,13 @@ impl Screen<'_> {
 
         if !is_right_click
             && self.is_close_press_tail(mouse_x_unscaled)
-            && !island::close_button_hit(
-                &layout,
-                self.context_manager.current_index(),
-                mouse_x_unscaled,
-            )
+            && !self.renderer.island.as_ref().is_some_and(|island| {
+                island.close_hit(
+                    &layout,
+                    self.context_manager.current_index(),
+                    mouse_x_unscaled,
+                )
+            })
         {
             return true;
         }
@@ -3053,7 +3074,9 @@ impl Screen<'_> {
         }
 
         if clicked_tab == self.context_manager.current_index()
-            && island::close_button_hit(&layout, clicked_tab, mouse_x_unscaled)
+            && self.renderer.island.as_ref().is_some_and(|island| {
+                island.close_hit(&layout, clicked_tab, mouse_x_unscaled)
+            })
         {
             self.stop_hint_mode_if_active();
             self.last_close_press = Some((std::time::Instant::now(), mouse_x_unscaled));

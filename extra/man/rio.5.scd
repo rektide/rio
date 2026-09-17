@@ -326,6 +326,230 @@ Default: _"Tab"_
 
 	Automatic color assignment based on program or path.
 
+# ISLAND
+
+This section documents the *[island]* table of the configuration file: the
+geometry and palette of the tab strip drawn in *Tab* navigation mode. All
+sizes are logical pixels; every field is optional.
+
+*height* = _<float>_
+
+	Height of the whole strip. The terminal grid starts below it and
+	mouse routing treats y < height as strip chrome.
+
+	Default: _38.0_
+
+*title-font-size* = _<float>_
+
+	Font size of tab titles.
+
+	Default: _12.0_
+
+*tab-padding-x* = _<float>_
+
+	Horizontal padding between a tab's edge and its (centred) title.
+
+	Default: _27.0_
+
+*tab-gap* = _<float>_
+
+	Space between tab slots; the pill is inset by half the gap on each
+	side.
+
+	Default: _6.0_
+
+*tab-inset-y* = _<float>_
+
+	Vertical inset of a tab pill from the top and bottom of the strip.
+	Kept below half of *height*.
+
+	Default: _7.0_
+
+*tab-radius* = _<float>_
+
+	Corner radius of a tab pill. Clamped to half the pill at draw time,
+	so large values round into a capsule.
+
+	Default: _6.0_
+
+*margin-right* = _<float>_
+
+	Right margin kept after the last tab slot.
+
+	Default: _8.0_
+
+*margin-left-macos* = _<float>_
+
+	Left margin on macOS clearing the traffic-light buttons. Ignored on
+	other platforms.
+
+	Default: _76.0_
+
+*progress-bar-height* = _<float>_
+
+	Thickness of the OSC 9;4 progress bar.
+
+	Default: _3.0_
+
+*progress-bar-timeout-secs* = _<integer>_
+
+	Seconds without an OSC 9;4 report before the progress bar is
+	dismissed.
+
+	Default: _15_
+
+*picker-swatch-size* = _<float>_
+
+	Size of one color-picker swatch.
+
+	Default: _18.0_
+
+*picker-swatch-gap* = _<float>_
+
+	Gap between color-picker swatches.
+
+	Default: _4.0_
+
+*picker-padding* = _<float>_
+
+	Inner padding of the color-picker dropdown.
+
+	Default: _6.0_
+
+*picker-input-height* = _<float>_
+
+	Height of the rename input inside the color picker.
+
+	Default: _26.0_
+
+*picker-input-font-size* = _<float>_
+
+	Font size of the rename input.
+
+	Default: _12.0_
+
+*picker-input-margin-top* = _<float>_
+
+	Space between the swatch row and the rename input.
+
+	Default: _8.0_
+
+*picker-top-padding* = _<float>_
+
+	Extra padding above the first swatch row.
+
+	Default: _4.0_
+
+*picker-colors* = _<list of hex colors>_
+
+	Swatches offered by the tab color picker (right-click or
+	ctrl-click a tab), as hex strings. The picker's width follows the
+	list length.
+
+	Default: red, orange, yellow, green, blue, purple
+
+*close-margin-right* = _<float>_
+
+	Distance from a pill's right edge to the close glyph center.
+
+	Default: _14.0_
+
+*close-glyph-half* = _<float>_
+
+	Half-size of the × glyph.
+
+	Default: _3.5_
+
+*close-min-island-width* = _<float>_
+
+	Pills narrower than this hide the close button.
+
+	Default: _64.0_
+
+*close-hover-half* = _<float>_
+
+	Half-size of the close-button hover highlight box.
+
+	Default: _10.0_
+
+*close-hover-corner-radius* = _<float>_
+
+	Corner radius of the close-button hover highlight.
+
+	Default: _5.0_
+
+*close-hit-half-width* = _<float>_
+
+	Half-width of the close-button hit area.
+
+	Default: _10.0_
+
+*close-alpha-idle* = _<float>_
+
+	Idle alpha of the close glyph.
+
+	Default: _0.55_
+
+*close-alpha-hover* = _<float>_
+
+	Hover alpha of the close glyph.
+
+	Default: _0.95_
+
+*close-stroke-width* = _<float>_
+
+	Stroke width of the close glyph lines.
+
+	Default: _1.2_
+
+*inactive-custom-mute* = _<float>_
+
+	Alpha multiplier applied to a custom-colored tab when it is not
+	the active one.
+
+	Default: _0.55_
+
+*drag-threshold* = _<float>_
+
+	Pointer travel before a tab press becomes a drag.
+
+	Default: _4.0_
+
+*drag-animation-length* = _<float>_
+
+	Slide-animation length (seconds) when tabs settle after reorder.
+
+	Default: _0.15_
+
+*drag-max-dt* = _<float>_
+
+	Upper bound on a single animation step (seconds).
+
+	Default: _0.05_
+
+*bell-dot-size* = _<float>_
+
+	Edge length of the bell dot drawn beside the title of a
+	background tab that rang.
+
+	Default: _6.0_
+
+*bell-dot-order* = _<integer>_
+
+	Rect draw order of the bell dot; must sit above the tab
+	backgrounds, which are submitted at order 0.
+
+	Default: _1_
+
+*bell-gap* = _<float>_
+
+	Gap between the bell dot and the tab title.
+
+	Default: _4.0_
+
+Values are clamped at load time so a degenerate setting degrades to a
+bound instead of drawing a broken strip.
+
 # SHELL
 
 This section documents the *[shell]* table of the configuration file.

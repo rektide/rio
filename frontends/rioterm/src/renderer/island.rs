@@ -8,6 +8,7 @@
 
 use crate::context::ContextManager;
 use crate::renderer::helpers::spring::Spring;
+use rio_backend::config::island::IslandConfig;
 use rio_backend::event::{EventProxy, ProgressReport, ProgressState};
 use rio_backend::sugarloaf::text::DrawOpts;
 use rio_backend::sugarloaf::{Attributes, Sugarloaf};
@@ -15,75 +16,33 @@ use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::time::Instant;
 
-pub const ISLAND_HEIGHT: f32 = 38.0;
-const PROGRESS_BAR_HEIGHT: f32 = 3.0;
-
-const PROGRESS_BAR_TIMEOUT_SECS: u64 = 15;
-const TITLE_FONT_SIZE: f32 = 12.0;
-
-const TAB_PADDING_X: f32 = 27.0;
-const TAB_GAP: f32 = 6.0;
-const TAB_INSET_Y: f32 = 7.0;
-const TAB_RADIUS: f32 = 6.0;
 const TITLE_ELLIPSIS: char = '…';
-/// Bell dot for tabs that rang while in the background, and the gap
-/// between it and the tab title. A dot, not a glyph: the UI text layer
-/// resolves one font per run, so a bell glyph exists only where an
-/// emoji font is installed and resolvable, while a dot renders
-/// identically everywhere. Drawn at rect order 1: the tab backgrounds
-/// are submitted at order 0 AFTER the title pass, so a same-order dot
-/// would be painted over and invisible in every multi-tab strip.
-const BELL_DOT_SIZE: f32 = 6.0;
-const BELL_DOT_ORDER: u8 = 1;
-const BELL_GAP: f32 = 4.0;
-const DRAG_THRESHOLD: f32 = 4.0;
-const DRAG_ANIMATION_LENGTH: f32 = 0.15;
-const DRAG_MAX_DT: f32 = 0.05;
-const ISLAND_MARGIN_RIGHT: f32 = 8.0;
 
-/// Color picker constants
-const PICKER_SWATCH_SIZE: f32 = 18.0;
-const PICKER_SWATCH_GAP: f32 = 4.0;
-const PICKER_PADDING: f32 = 6.0;
-const PICKER_INPUT_HEIGHT: f32 = 26.0;
-const PICKER_INPUT_FONT_SIZE: f32 = 12.0;
-const PICKER_INPUT_MARGIN_TOP: f32 = 8.0;
-const PICKER_TOP_PADDING: f32 = 4.0;
-const PICKER_HEIGHT: f32 = PICKER_TOP_PADDING
-    + PICKER_SWATCH_SIZE
-    + PICKER_PADDING * 2.0
-    + PICKER_INPUT_MARGIN_TOP
-    + PICKER_INPUT_HEIGHT
-    + PICKER_PADDING;
-const PICKER_COLORS: [[f32; 4]; 6] = [
-    // red
-    [0.86, 0.26, 0.27, 1.0],
-    // orange
-    [0.90, 0.57, 0.22, 1.0],
-    // yellow
-    [0.85, 0.78, 0.25, 1.0],
-    // green
-    [0.34, 0.70, 0.38, 1.0],
-    // blue
-    [0.30, 0.55, 0.85, 1.0],
-    // purple
-    [0.68, 0.40, 0.80, 1.0],
-];
+/// Height of the color-picker dropdown — derived from its parts, same
+/// composition the old `PICKER_HEIGHT` constant spelled out.
+#[inline]
+fn picker_height(cfg: &IslandConfig) -> f32 {
+    cfg.picker_top_padding
+        + cfg.picker_swatch_size
+        + cfg.picker_padding * 2.0
+        + cfg.picker_input_margin_top
+        + cfg.picker_input_height
+        + cfg.picker_padding
+}
 
-/// Left margin on macOS to account for traffic light buttons
-#[cfg(target_os = "macos")]
-const ISLAND_MARGIN_LEFT_MACOS: f32 = 76.0;
+/// Swatch slots in the picker: N colors plus the reset swatch.
+#[inline]
+fn picker_slot_count(cfg: &IslandConfig) -> usize {
+    cfg.picker_colors.len() + 1
+}
 
-const CLOSE_MARGIN_RIGHT: f32 = 14.0;
-const CLOSE_GLYPH_HALF: f32 = 3.5;
-const CLOSE_MIN_ISLAND_WIDTH: f32 = 64.0;
-const CLOSE_HOVER_HALF: f32 = 10.0;
-const CLOSE_HOVER_CORNER_RADIUS: f32 = 5.0;
-const CLOSE_HIT_HALF_WIDTH: f32 = 10.0;
-const CLOSE_ALPHA_IDLE: f32 = 0.55;
-const CLOSE_ALPHA_HOVER: f32 = 0.95;
-const CLOSE_STROKE_WIDTH: f32 = 1.2;
-const INACTIVE_CUSTOM_MUTE: f32 = 0.55;
+/// Width of the whole swatch row (slots + gaps).
+#[inline]
+fn picker_total_width(cfg: &IslandConfig) -> f32 {
+    let slots = picker_slot_count(cfg) as f32;
+    slots * cfg.picker_swatch_size
+        + (picker_slot_count(cfg) as f32 - 1.0) * cfg.picker_swatch_gap
+}
 
 struct TabDrag {
     // Index of the dragged tab, follows the tab as it reorders.
@@ -94,18 +53,20 @@ struct TabDrag {
     grab_offset: f32,
     // Latest unscaled mouse x.
     current_x: f32,
-    // True once movement exceeded `DRAG_THRESHOLD`.
+    // True once movement exceeded `drag-threshold`.
     started: bool,
 }
 
 fn fit_title_to_width<'a>(
     sugarloaf: &mut Sugarloaf,
+    cfg: &IslandConfig,
     title: &'a str,
     max_width: f32,
 ) -> Cow<'a, str> {
     let attrs = Attributes::default();
+    let font_size = cfg.title_font_size;
     fit_title_with_widths(title, max_width, |c| {
-        sugarloaf.char_advance(c, attrs, TITLE_FONT_SIZE)
+        sugarloaf.char_advance(c, attrs, font_size)
     })
 }
 
@@ -147,18 +108,18 @@ pub struct TabStripLayout {
 /// Compute the tab strip layout from the physical window width.
 /// `max_tab_width` comes from `navigation.max-tab-width` (logical px).
 pub fn tab_strip_layout(
+    cfg: &IslandConfig,
     window_width: f32,
     scale_factor: f32,
     num_tabs: usize,
     max_tab_width: f32,
 ) -> TabStripLayout {
     #[cfg(target_os = "macos")]
-    let left_margin = ISLAND_MARGIN_LEFT_MACOS;
+    let left_margin = cfg.margin_left_macos;
     #[cfg(not(target_os = "macos"))]
     let left_margin = 0.0;
 
-    let available_width =
-        (window_width / scale_factor) - ISLAND_MARGIN_RIGHT - left_margin;
+    let available_width = (window_width / scale_factor) - cfg.margin_right - left_margin;
     let tab_width =
         (available_width / num_tabs.max(1) as f32).clamp(0.0, max_tab_width.max(0.0));
     TabStripLayout {
@@ -244,12 +205,16 @@ fn draw_island(
 }
 
 #[inline]
-fn island_rect(slot_x: f32, tab_width: f32) -> (f32, f32, f32, f32, f32) {
-    let x = slot_x + TAB_GAP / 2.0;
-    let w = (tab_width - TAB_GAP).max(0.0);
-    let y = TAB_INSET_Y;
-    let h = ISLAND_HEIGHT - TAB_INSET_Y * 2.0;
-    let radius = TAB_RADIUS.min(w / 2.0).min(h / 2.0);
+fn island_rect(
+    cfg: &IslandConfig,
+    slot_x: f32,
+    tab_width: f32,
+) -> (f32, f32, f32, f32, f32) {
+    let x = slot_x + cfg.tab_gap / 2.0;
+    let w = (tab_width - cfg.tab_gap).max(0.0);
+    let y = cfg.tab_inset_y;
+    let h = cfg.height - cfg.tab_inset_y * 2.0;
+    let radius = cfg.tab_radius.min(w / 2.0).min(h / 2.0);
     (x, y, w, h, radius)
 }
 
@@ -258,11 +223,16 @@ fn island_rect(slot_x: f32, tab_width: f32) -> (f32, f32, f32, f32, f32) {
 /// `window_width` is physical, as `render` receives it, while everything
 /// drawn is logical, the same conversion `tab_strip_layout` makes.
 #[inline]
-fn single_title_budget(window_width: f32, scale_factor: f32, left_margin: f32) -> f32 {
+fn single_title_budget(
+    cfg: &IslandConfig,
+    window_width: f32,
+    scale_factor: f32,
+    left_margin: f32,
+) -> f32 {
     ((window_width / scale_factor)
         - left_margin
-        - ISLAND_MARGIN_RIGHT
-        - TAB_PADDING_X * 2.0)
+        - cfg.margin_right
+        - cfg.tab_padding_x * 2.0)
         .max(0.0)
 }
 
@@ -271,50 +241,58 @@ fn single_title_budget(window_width: f32, scale_factor: f32, left_margin: f32) -
 /// logical out, as above.
 #[inline]
 fn single_title_x(
+    cfg: &IslandConfig,
     window_width: f32,
     scale_factor: f32,
     text_width: f32,
     left_margin: f32,
 ) -> f32 {
-    (((window_width / scale_factor) - text_width) / 2.0).max(left_margin + TAB_PADDING_X)
+    (((window_width / scale_factor) - text_width) / 2.0)
+        .max(left_margin + cfg.tab_padding_x)
 }
 
 #[inline]
-fn close_button_center(island_x: f32, island_w: f32) -> Option<f32> {
-    (island_w >= CLOSE_MIN_ISLAND_WIDTH)
-        .then_some(island_x + island_w - CLOSE_MARGIN_RIGHT)
+fn close_button_center(cfg: &IslandConfig, island_x: f32, island_w: f32) -> Option<f32> {
+    (island_w >= cfg.close_min_island_width)
+        .then_some(island_x + island_w - cfg.close_margin_right)
 }
 
 #[inline]
-fn close_button_center_x(layout: &TabStripLayout, tab_index: usize) -> Option<f32> {
+fn close_button_center_x(
+    cfg: &IslandConfig,
+    layout: &TabStripLayout,
+    tab_index: usize,
+) -> Option<f32> {
     let slot_x = layout.left_margin + tab_index as f32 * layout.tab_width;
-    let (ix, _, iw, _, _) = island_rect(slot_x, layout.tab_width);
-    close_button_center(ix, iw)
+    let (ix, _, iw, _, _) = island_rect(cfg, slot_x, layout.tab_width);
+    close_button_center(cfg, ix, iw)
 }
 
 #[inline]
-pub fn close_button_hit(
+fn close_button_hit(
+    cfg: &IslandConfig,
     layout: &TabStripLayout,
     tab_index: usize,
     x_unscaled: f32,
 ) -> bool {
-    close_button_center_x(layout, tab_index)
-        .is_some_and(|cx| (x_unscaled - cx).abs() <= CLOSE_HIT_HALF_WIDTH)
+    close_button_center_x(cfg, layout, tab_index)
+        .is_some_and(|cx| (x_unscaled - cx).abs() <= cfg.close_hit_half_width)
 }
 
 fn draw_close_button(
     sugarloaf: &mut Sugarloaf,
+    cfg: &IslandConfig,
     cx: f32,
     color: [f32; 4],
     hover: bool,
     order: u8,
 ) {
-    let cy = ISLAND_HEIGHT / 2.0;
-    let r = CLOSE_GLYPH_HALF;
+    let cy = cfg.height / 2.0;
+    let r = cfg.close_glyph_half;
     let alpha = if hover {
-        CLOSE_ALPHA_HOVER
+        cfg.close_alpha_hover
     } else {
-        CLOSE_ALPHA_IDLE
+        cfg.close_alpha_idle
     };
     let color = [color[0], color[1], color[2], color[3] * alpha];
     sugarloaf.line(
@@ -322,7 +300,7 @@ fn draw_close_button(
         cy - r,
         cx + r,
         cy + r,
-        CLOSE_STROKE_WIDTH,
+        cfg.close_stroke_width,
         0.0,
         color,
         order,
@@ -332,7 +310,7 @@ fn draw_close_button(
         cy + r,
         cx + r,
         cy - r,
-        CLOSE_STROKE_WIDTH,
+        cfg.close_stroke_width,
         0.0,
         color,
         order,
@@ -343,6 +321,8 @@ pub struct Island {
     pub hide_if_single: bool,
     /// Cap on tab width in logical px (`navigation.max-tab-width`).
     pub max_tab_width: f32,
+    /// Geometry and palette knobs (`[island]` table).
+    pub config: IslandConfig,
     pub inactive_text_color: [f32; 4],
     pub active_text_color: [f32; 4],
     /// Current progress bar state
@@ -381,6 +361,7 @@ pub struct Island {
 
 impl Island {
     pub fn new(
+        config: IslandConfig,
         inactive_text_color: [f32; 4],
         active_text_color: [f32; 4],
         hide_if_single: bool,
@@ -389,6 +370,7 @@ impl Island {
         Self {
             hide_if_single,
             max_tab_width,
+            config,
             inactive_text_color,
             active_text_color,
             progress_state: None,
@@ -466,7 +448,7 @@ impl Island {
     }
 
     /// Arm a tab drag at mouse press. The drag only `started`s once the
-    /// pointer moves past `DRAG_THRESHOLD`.
+    /// pointer moves past `drag-threshold`.
     pub fn start_drag(&mut self, tab_index: usize, grab_offset: f32, x: f32) {
         self.drag = Some(TabDrag {
             tab_index,
@@ -483,7 +465,8 @@ impl Island {
         match self.drag.as_mut() {
             Some(drag) => {
                 drag.current_x = x;
-                if !drag.started && (x - drag.press_x).abs() > DRAG_THRESHOLD {
+                if !drag.started && (x - drag.press_x).abs() > self.config.drag_threshold
+                {
                     drag.started = true;
                 }
                 drag.started
@@ -645,7 +628,7 @@ impl Island {
     /// a long-running TUI that keeps reporting stays visible.
     fn check_progress_timeout(&mut self) {
         if let Some(last_seen) = self.progress_last_seen {
-            if last_seen.elapsed().as_secs() >= PROGRESS_BAR_TIMEOUT_SECS {
+            if last_seen.elapsed().as_secs() >= self.config.progress_bar_timeout_secs {
                 self.progress_state = None;
                 self.progress_value = None;
                 self.progress_started_at = None;
@@ -693,7 +676,7 @@ impl Island {
                         0.0,
                         y_position,
                         bar_width,
-                        PROGRESS_BAR_HEIGHT,
+                        self.config.progress_bar_height,
                         color,
                         0.0, // Same depth as other rects
                         0,
@@ -723,7 +706,7 @@ impl Island {
                     x_pos,
                     y_position,
                     bar_width,
-                    PROGRESS_BAR_HEIGHT,
+                    self.config.progress_bar_height,
                     color,
                     0.0,
                     0,
@@ -735,7 +718,36 @@ impl Island {
     /// Get the height of the island
     #[inline]
     pub fn height(&self) -> f32 {
-        ISLAND_HEIGHT
+        self.config.height
+    }
+
+    /// Layout of the tab strip for the current window, from this
+    /// island's `[island]` geometry.
+    #[inline]
+    pub fn layout(
+        &self,
+        window_width: f32,
+        scale_factor: f32,
+        num_tabs: usize,
+    ) -> TabStripLayout {
+        tab_strip_layout(
+            &self.config,
+            window_width,
+            scale_factor,
+            num_tabs,
+            self.max_tab_width,
+        )
+    }
+
+    /// Whether `x_unscaled` (logical) hits the given tab's close button.
+    #[inline]
+    pub fn close_hit(
+        &self,
+        layout: &TabStripLayout,
+        tab_index: usize,
+        x_unscaled: f32,
+    ) -> bool {
+        close_button_hit(&self.config, layout, tab_index, x_unscaled)
     }
 
     /// Render tabs using equal-width layout
@@ -790,13 +802,18 @@ impl Island {
         let dt = now
             .duration_since(self.last_anim_frame)
             .as_secs_f32()
-            .min(DRAG_MAX_DT);
+            .min(self.config.drag_max_dt);
         self.last_anim_frame = now;
         self.slide_springs
-            .retain(|_, s| s.update(dt, DRAG_ANIMATION_LENGTH));
+            .retain(|_, s| s.update(dt, self.config.drag_animation_length));
 
-        let layout =
-            tab_strip_layout(window_width, scale_factor, num_tabs, self.max_tab_width);
+        let layout = tab_strip_layout(
+            &self.config,
+            window_width,
+            scale_factor,
+            num_tabs,
+            self.max_tab_width,
+        );
         let TabStripLayout {
             left_margin,
             tab_width,
@@ -864,7 +881,7 @@ impl Island {
             };
 
             let title_opts = DrawOpts {
-                font_size: TITLE_FONT_SIZE,
+                font_size: self.config.title_font_size,
                 color: color_u8(text_color),
                 ..DrawOpts::default()
             };
@@ -873,15 +890,21 @@ impl Island {
             // a single font per draw from the run's first char, so gluing it
             // onto the title would shape the whole title in the emoji font.
             let bell = context_manager.bell(tab_index);
-            let bell_width = if bell { BELL_DOT_SIZE + BELL_GAP } else { 0.0 };
+            let bell_width = if bell {
+                self.config.bell_dot_size + self.config.bell_gap
+            } else {
+                0.0
+            };
 
             let max_text_width = if single {
-                single_title_budget(window_width, scale_factor, left_margin) - bell_width
+                single_title_budget(&self.config, window_width, scale_factor, left_margin)
+                    - bell_width
             } else {
-                tab_width - TAB_PADDING_X * 2.0 - bell_width
+                tab_width - self.config.tab_padding_x * 2.0 - bell_width
             }
             .max(0.0);
-            let title = fit_title_to_width(sugarloaf, &raw_title, max_text_width);
+            let title =
+                fit_title_to_width(sugarloaf, &self.config, &raw_title, max_text_width);
 
             // UI text always paints in a final pass above every rect,
             // so the floating tab's opaque background can't occlude
@@ -890,7 +913,7 @@ impl Island {
             // widest a centered title can reach).
             let hidden_by_drag = floating_left.is_some_and(|fl| {
                 let overlap = (tab_x + tab_width).min(fl + tab_width) - tab_x.max(fl);
-                overlap > TAB_PADDING_X
+                overlap > self.config.tab_padding_x
             });
 
             if !hidden_by_drag {
@@ -900,28 +923,35 @@ impl Island {
                 let text_width =
                     sugarloaf.text_mut().measure(&title, &title_opts) + bell_width;
                 let text_x = if single {
-                    single_title_x(window_width, scale_factor, text_width, left_margin)
+                    single_title_x(
+                        &self.config,
+                        window_width,
+                        scale_factor,
+                        text_width,
+                        left_margin,
+                    )
                 } else {
                     tab_x + (tab_width - text_width) / 2.0
                 };
-                let text_y = (ISLAND_HEIGHT / 2.0) - (TITLE_FONT_SIZE / 2.);
+                let text_y =
+                    (self.config.height / 2.0) - (self.config.title_font_size / 2.);
                 if bell {
                     // Centered on the title's lowercase body, not the strip:
                     // the em box hangs from `text_y` with its optical middle
                     // about two thirds down, so a strip-centered dot rides
                     // visibly high next to lowercase titles.
-                    let dot_y =
-                        text_y + TITLE_FONT_SIZE * (2.0 / 3.0) - BELL_DOT_SIZE / 2.0;
+                    let dot_y = text_y + self.config.title_font_size * (2.0 / 3.0)
+                        - self.config.bell_dot_size / 2.0;
                     sugarloaf.rounded_rect(
                         None,
                         text_x,
                         dot_y,
-                        BELL_DOT_SIZE,
-                        BELL_DOT_SIZE,
+                        self.config.bell_dot_size,
+                        self.config.bell_dot_size,
                         text_color,
                         0.0,
-                        BELL_DOT_SIZE / 2.0,
-                        BELL_DOT_ORDER,
+                        self.config.bell_dot_size / 2.0,
+                        self.config.bell_dot_order,
                     );
                 }
                 sugarloaf.text_mut().draw(
@@ -944,11 +974,11 @@ impl Island {
             // toward the strip — a white "active" overlay would
             // bleach custom colors to pastel on light themes, so the
             // hierarchy is carried by the mute instead.
-            let (ix, iy, iw, ih, radius) = island_rect(tab_x, tab_width);
+            let (ix, iy, iw, ih, radius) = island_rect(&self.config, tab_x, tab_width);
             let fill = match context_manager.custom_color(tab_index) {
                 Some(mut custom) => {
                     if !is_active {
-                        custom[3] *= INACTIVE_CUSTOM_MUTE;
+                        custom[3] *= self.config.inactive_custom_mute;
                     }
                     custom
                 }
@@ -974,22 +1004,23 @@ impl Island {
             );
 
             if is_active && num_tabs > 1 {
-                if let Some(cx) = close_button_center(ix, iw) {
+                if let Some(cx) = close_button_center(&self.config, ix, iw) {
                     if self.close_hover {
                         sugarloaf.rounded_rect(
                             None,
-                            cx - CLOSE_HOVER_HALF,
-                            ISLAND_HEIGHT / 2.0 - CLOSE_HOVER_HALF,
-                            CLOSE_HOVER_HALF * 2.0,
-                            CLOSE_HOVER_HALF * 2.0,
+                            cx - self.config.close_hover_half,
+                            self.config.height / 2.0 - self.config.close_hover_half,
+                            self.config.close_hover_half * 2.0,
+                            self.config.close_hover_half * 2.0,
                             fills.close_hover,
                             0.05,
-                            CLOSE_HOVER_CORNER_RADIUS,
+                            self.config.close_hover_corner_radius,
                             1,
                         );
                     }
                     draw_close_button(
                         sugarloaf,
+                        &self.config,
                         cx,
                         self.active_text_color,
                         self.close_hover,
@@ -1004,7 +1035,8 @@ impl Island {
 
         // Draw the floating (dragged) tab above the slot tabs.
         if let (Some(drag_idx), Some(floating_x)) = (drag_index, floating_left) {
-            let (ix, iy, iw, ih, radius) = island_rect(floating_x, tab_width);
+            let (ix, iy, iw, ih, radius) =
+                island_rect(&self.config, floating_x, tab_width);
 
             // Soft elevation: a slightly inflated dark halo behind the
             // lifted island so it reads as floating over the strip.
@@ -1044,23 +1076,37 @@ impl Island {
                 11,
             );
 
-            if let Some(cx) = close_button_center(ix, iw) {
-                draw_close_button(sugarloaf, cx, self.active_text_color, false, 12);
+            if let Some(cx) = close_button_center(&self.config, ix, iw) {
+                draw_close_button(
+                    sugarloaf,
+                    &self.config,
+                    cx,
+                    self.active_text_color,
+                    false,
+                    12,
+                );
             }
 
             let raw_title = self.get_title_for_tab(context_manager, drag_idx);
             if !raw_title.is_empty() {
-                let max_text_width = (tab_width - TAB_PADDING_X * 2.0).max(0.0);
-                let title = fit_title_to_width(sugarloaf, &raw_title, max_text_width);
+                let max_text_width =
+                    (tab_width - self.config.tab_padding_x * 2.0).max(0.0);
+                let title = fit_title_to_width(
+                    sugarloaf,
+                    &self.config,
+                    &raw_title,
+                    max_text_width,
+                );
                 let title_opts = DrawOpts {
-                    font_size: TITLE_FONT_SIZE,
+                    font_size: self.config.title_font_size,
                     color: color_u8(self.active_text_color),
                     ..DrawOpts::default()
                 };
                 let ui = sugarloaf.text_mut();
                 let text_width = ui.measure(&title, &title_opts);
                 let text_x = floating_x + (tab_width - text_width) / 2.0;
-                let text_y = (ISLAND_HEIGHT / 2.0) - (TITLE_FONT_SIZE / 2.);
+                let text_y =
+                    (self.config.height / 2.0) - (self.config.title_font_size / 2.);
                 ui.draw(text_x, text_y, &title, &title_opts);
             }
         }
@@ -1075,7 +1121,12 @@ impl Island {
         }
 
         // Render the progress bar below the island
-        self.render_progress_bar(sugarloaf, window_width, scale_factor, ISLAND_HEIGHT);
+        self.render_progress_bar(
+            sugarloaf,
+            window_width,
+            scale_factor,
+            self.config.height,
+        );
     }
 
     /// Toggle the color picker for a given tab index
@@ -1204,14 +1255,22 @@ impl Island {
             left_margin,
             tab_width,
             ..
-        } = tab_strip_layout(window_width, scale_factor, num_tabs, self.max_tab_width);
+        } = tab_strip_layout(
+            &self.config,
+            window_width,
+            scale_factor,
+            num_tabs,
+            self.max_tab_width,
+        );
         let tab_x = left_margin + picker_tab as f32 * tab_width;
 
         // Picker is rendered just below the island
-        let picker_y = ISLAND_HEIGHT;
+        let picker_y = self.config.height;
 
         // Check if click is within picker vertical range
-        if mouse_y_unscaled < picker_y || mouse_y_unscaled > picker_y + PICKER_HEIGHT {
+        if mouse_y_unscaled < picker_y
+            || mouse_y_unscaled > picker_y + picker_height(&self.config)
+        {
             // Click outside picker — apply rename and close
             self.apply_rename(context_manager);
             self.color_picker_tab = None;
@@ -1219,19 +1278,19 @@ impl Island {
         }
 
         // Total picker width — N color swatches + 1 reset swatch
-        let slot_count = PICKER_COLORS.len() + 1;
-        let total_swatches_width = slot_count as f32 * PICKER_SWATCH_SIZE
-            + (slot_count - 1) as f32 * PICKER_SWATCH_GAP;
+        let total_swatches_width = picker_total_width(&self.config);
         let picker_start_x = tab_x + (tab_width - total_swatches_width) / 2.0;
 
         // Check each swatch
-        let swatch_y = picker_y + PICKER_PADDING + PICKER_TOP_PADDING;
-        let swatch_y_end = swatch_y + PICKER_SWATCH_SIZE;
-        for (i, color) in PICKER_COLORS.iter().enumerate() {
-            let swatch_x =
-                picker_start_x + i as f32 * (PICKER_SWATCH_SIZE + PICKER_SWATCH_GAP);
+        let swatch_y =
+            picker_y + self.config.picker_padding + self.config.picker_top_padding;
+        let swatch_y_end = swatch_y + self.config.picker_swatch_size;
+        for (i, color) in self.config.picker_colors.iter().enumerate() {
+            let swatch_x = picker_start_x
+                + i as f32
+                    * (self.config.picker_swatch_size + self.config.picker_swatch_gap);
             if mouse_x_unscaled >= swatch_x
-                && mouse_x_unscaled <= swatch_x + PICKER_SWATCH_SIZE
+                && mouse_x_unscaled <= swatch_x + self.config.picker_swatch_size
                 && mouse_y_unscaled >= swatch_y
                 && mouse_y_unscaled <= swatch_y_end
             {
@@ -1244,9 +1303,10 @@ impl Island {
 
         // Reset swatch — clears any custom color for this tab
         let reset_x = picker_start_x
-            + PICKER_COLORS.len() as f32 * (PICKER_SWATCH_SIZE + PICKER_SWATCH_GAP);
+            + self.config.picker_colors.len() as f32
+                * (self.config.picker_swatch_size + self.config.picker_swatch_gap);
         if mouse_x_unscaled >= reset_x
-            && mouse_x_unscaled <= reset_x + PICKER_SWATCH_SIZE
+            && mouse_x_unscaled <= reset_x + self.config.picker_swatch_size
             && mouse_y_unscaled >= swatch_y
             && mouse_y_unscaled <= swatch_y_end
         {
@@ -1268,15 +1328,14 @@ impl Island {
         tab_width: f32,
         selected_color: Option<[f32; 4]>,
     ) {
-        let padding = PICKER_PADDING;
-        let bg_y = ISLAND_HEIGHT;
+        let padding = self.config.picker_padding;
+        let bg_y = self.config.height;
+        let swatch_size = self.config.picker_swatch_size;
+        let swatch_advance = swatch_size + self.config.picker_swatch_gap;
 
         // Compute total swatches width to derive the consistent inner content width
         // N color swatches + 1 reset swatch
-        let slot_count = PICKER_COLORS.len() + 1;
-        let total_swatches_width = slot_count as f32 * PICKER_SWATCH_SIZE
-            + (slot_count - 1) as f32 * PICKER_SWATCH_GAP;
-        let inner_width = total_swatches_width;
+        let inner_width = picker_total_width(&self.config);
         let bg_width = inner_width + padding * 2.0;
         let bg_x = tab_x + (tab_width - bg_width) / 2.0;
         let content_x = bg_x + padding;
@@ -1287,7 +1346,7 @@ impl Island {
             bg_x,
             bg_y,
             bg_width,
-            PICKER_HEIGHT,
+            picker_height(&self.config),
             [0.15, 0.15, 0.15, 1.0],
             0.0,
             4.0,
@@ -1295,9 +1354,9 @@ impl Island {
         );
 
         // Swatches — aligned to content_x
-        let swatch_y = bg_y + padding + PICKER_TOP_PADDING;
-        for (i, color) in PICKER_COLORS.iter().enumerate() {
-            let sx = content_x + i as f32 * (PICKER_SWATCH_SIZE + PICKER_SWATCH_GAP);
+        let swatch_y = bg_y + padding + self.config.picker_top_padding;
+        for (i, color) in self.config.picker_colors.iter().enumerate() {
+            let sx = content_x + i as f32 * swatch_advance;
             let is_selected = selected_color == Some(*color);
 
             // Draw white border behind selected swatch
@@ -1307,8 +1366,8 @@ impl Island {
                     None,
                     sx - border,
                     swatch_y - border,
-                    PICKER_SWATCH_SIZE + border * 2.0,
-                    PICKER_SWATCH_SIZE + border * 2.0,
+                    swatch_size + border * 2.0,
+                    swatch_size + border * 2.0,
                     [1.0, 1.0, 1.0, 1.0],
                     0.0,
                     4.0,
@@ -1320,8 +1379,8 @@ impl Island {
                 None,
                 sx,
                 swatch_y,
-                PICKER_SWATCH_SIZE,
-                PICKER_SWATCH_SIZE,
+                swatch_size,
+                swatch_size,
                 *color,
                 0.0,
                 3.0,
@@ -1330,8 +1389,7 @@ impl Island {
         }
 
         // Reset swatch — neutral box with a diagonal slash, selected when no color is set
-        let reset_x = content_x
-            + PICKER_COLORS.len() as f32 * (PICKER_SWATCH_SIZE + PICKER_SWATCH_GAP);
+        let reset_x = content_x + self.config.picker_colors.len() as f32 * swatch_advance;
         let reset_selected = selected_color.is_none();
         if reset_selected {
             let border = 2.0;
@@ -1339,8 +1397,8 @@ impl Island {
                 None,
                 reset_x - border,
                 swatch_y - border,
-                PICKER_SWATCH_SIZE + border * 2.0,
-                PICKER_SWATCH_SIZE + border * 2.0,
+                swatch_size + border * 2.0,
+                swatch_size + border * 2.0,
                 [1.0, 1.0, 1.0, 1.0],
                 0.0,
                 4.0,
@@ -1351,8 +1409,8 @@ impl Island {
             None,
             reset_x,
             swatch_y,
-            PICKER_SWATCH_SIZE,
-            PICKER_SWATCH_SIZE,
+            swatch_size,
+            swatch_size,
             [0.22, 0.22, 0.22, 1.0],
             0.0,
             3.0,
@@ -1361,8 +1419,8 @@ impl Island {
         let slash_inset = 3.0;
         sugarloaf.line(
             reset_x + slash_inset,
-            swatch_y + PICKER_SWATCH_SIZE - slash_inset,
-            reset_x + PICKER_SWATCH_SIZE - slash_inset,
+            swatch_y + swatch_size - slash_inset,
+            reset_x + swatch_size - slash_inset,
             swatch_y + slash_inset,
             1.5,
             0.0,
@@ -1371,7 +1429,7 @@ impl Island {
         );
 
         // Rename text input — same left/right edge as swatches
-        let input_y = swatch_y + PICKER_SWATCH_SIZE + PICKER_INPUT_MARGIN_TOP;
+        let input_y = swatch_y + swatch_size + self.config.picker_input_margin_top;
         let input_x = content_x;
         let input_width = inner_width;
 
@@ -1381,7 +1439,7 @@ impl Island {
             input_x,
             input_y,
             input_width,
-            PICKER_INPUT_HEIGHT,
+            self.config.picker_input_height,
             [0.10, 0.10, 0.10, 1.0],
             0.0,
             3.0,
@@ -1391,7 +1449,9 @@ impl Island {
         let text_inset = 6.0;
         let text_x = input_x + text_inset;
         let max_text_width = input_width - text_inset * 2.0;
-        let text_y = input_y + (PICKER_INPUT_HEIGHT - PICKER_INPUT_FONT_SIZE) / 2.0;
+        let text_y = input_y
+            + (self.config.picker_input_height - self.config.picker_input_font_size)
+                / 2.0;
 
         let text_color = if self.rename_input.is_empty() {
             [0.45, 0.45, 0.45, 1.0]
@@ -1399,7 +1459,7 @@ impl Island {
             [0.93, 0.93, 0.93, 1.0]
         };
         let rename_opts = DrawOpts {
-            font_size: PICKER_INPUT_FONT_SIZE,
+            font_size: self.config.picker_input_font_size,
             color: color_u8(text_color),
             ..DrawOpts::default()
         };
@@ -1452,7 +1512,7 @@ impl Island {
                     caret_x,
                     input_y + 4.0,
                     1.5,
-                    PICKER_INPUT_HEIGHT - 8.0,
+                    self.config.picker_input_height - 8.0,
                     [0.93, 0.93, 0.93, 1.0],
                     0.0,
                     10,
@@ -1491,13 +1551,18 @@ fn color_u8(c: [f32; 4]) -> [u8; 4] {
 mod tests {
     use super::*;
 
+    /// The relations the old `const` assertions guaranteed now hold by
+    /// construction: `IslandConfig::sanitize` enforces them (see its
+    /// tests in rio-backend), so the default config must satisfy them.
     #[test]
     fn island_geometry_invariants() {
-        const {
-            assert!(TAB_INSET_Y * 2.0 < ISLAND_HEIGHT);
-            assert!(CLOSE_MARGIN_RIGHT + CLOSE_HIT_HALF_WIDTH < CLOSE_MIN_ISLAND_WIDTH);
-            assert!(CLOSE_HOVER_HALF * 2.0 <= ISLAND_HEIGHT - TAB_INSET_Y * 2.0);
-        }
+        let cfg = IslandConfig::default();
+        assert!(cfg.tab_inset_y * 2.0 < cfg.height);
+        assert!(
+            cfg.close_margin_right + cfg.close_hit_half_width
+                < cfg.close_min_island_width
+        );
+        assert!(cfg.close_hover_half * 2.0 <= cfg.height - cfg.tab_inset_y * 2.0);
     }
 
     /// The regression that shipped: `window_width` is physical while draws
@@ -1505,67 +1570,72 @@ mod tests {
     /// 2x display and nothing appeared at all.
     #[test]
     fn single_title_is_centred_in_logical_pixels() {
+        let cfg = IslandConfig::default();
         // 1600 physical at 2x is an 800pt strip, so a 100pt title starts at
         // 350, not at 750 (which would be centred on the physical width and
         // sit past the right edge).
-        let x = single_title_x(1600.0, 2.0, 100.0, 0.0);
+        let x = single_title_x(&cfg, 1600.0, 2.0, 100.0, 0.0);
         assert_eq!(x, 350.0);
         assert!(x + 100.0 <= 800.0, "title must stay on screen: {x}");
 
         // At 1x the two agree, which is why this only showed up on retina.
-        assert_eq!(single_title_x(800.0, 1.0, 100.0, 0.0), 350.0);
+        assert_eq!(single_title_x(&cfg, 800.0, 1.0, 100.0, 0.0), 350.0);
     }
 
     #[test]
     fn single_title_never_reaches_under_the_traffic_lights() {
+        let cfg = IslandConfig::default();
         let margin = 76.0;
         // A title wider than the strip would centre at a negative x.
-        let x = single_title_x(1600.0, 2.0, 900.0, margin);
-        assert_eq!(x, margin + TAB_PADDING_X);
+        let x = single_title_x(&cfg, 1600.0, 2.0, 900.0, margin);
+        assert_eq!(x, margin + cfg.tab_padding_x);
     }
 
     #[test]
     fn single_title_budget_leaves_both_margins() {
+        let cfg = IslandConfig::default();
         // 800pt strip, no left margin: full width less the right margin and
         // the padding on each side.
         assert_eq!(
-            single_title_budget(1600.0, 2.0, 0.0),
-            800.0 - ISLAND_MARGIN_RIGHT - TAB_PADDING_X * 2.0
+            single_title_budget(&cfg, 1600.0, 2.0, 0.0),
+            800.0 - cfg.margin_right - cfg.tab_padding_x * 2.0
         );
         // The macOS left margin comes off the top of that.
         assert_eq!(
-            single_title_budget(1600.0, 2.0, 76.0),
-            800.0 - 76.0 - ISLAND_MARGIN_RIGHT - TAB_PADDING_X * 2.0
+            single_title_budget(&cfg, 1600.0, 2.0, 76.0),
+            800.0 - 76.0 - cfg.margin_right - cfg.tab_padding_x * 2.0
         );
         // A window too narrow to hold any text yields no budget, not a
         // negative one that would underflow the truncation.
-        assert_eq!(single_title_budget(100.0, 2.0, 76.0), 0.0);
+        assert_eq!(single_title_budget(&cfg, 100.0, 2.0, 76.0), 0.0);
     }
 
     /// A lone title gets far more room than a tab slot would give it, which
     /// is the point of dropping the island.
     #[test]
     fn single_title_budget_beats_a_tab_slot() {
-        let slot = tab_strip_layout(1600.0, 2.0, 1, 240.0).tab_width;
-        let slot_budget = (slot - TAB_PADDING_X * 2.0).max(0.0);
+        let cfg = IslandConfig::default();
+        let slot = tab_strip_layout(&cfg, 1600.0, 2.0, 1, 240.0).tab_width;
+        let slot_budget = (slot - cfg.tab_padding_x * 2.0).max(0.0);
         assert!(
-            single_title_budget(1600.0, 2.0, 0.0) > slot_budget,
+            single_title_budget(&cfg, 1600.0, 2.0, 0.0) > slot_budget,
             "expected more than a slot's {slot_budget}"
         );
     }
 
     #[test]
     fn island_rect_insets_slot_and_clamps_radius() {
+        let cfg = IslandConfig::default();
         // Slot at x=100, width 180 → island inset by half the gap on
-        // each side and TAB_INSET_Y vertically.
-        let (x, y, w, h, radius) = island_rect(100.0, 180.0);
-        assert_eq!(x, 100.0 + TAB_GAP / 2.0);
-        assert_eq!(y, TAB_INSET_Y);
-        assert_eq!(w, 180.0 - TAB_GAP);
-        assert_eq!(h, ISLAND_HEIGHT - TAB_INSET_Y * 2.0);
-        assert_eq!(radius, TAB_RADIUS);
+        // each side and tab-inset-y vertically.
+        let (x, y, w, h, radius) = island_rect(&cfg, 100.0, 180.0);
+        assert_eq!(x, 100.0 + cfg.tab_gap / 2.0);
+        assert_eq!(y, cfg.tab_inset_y);
+        assert_eq!(w, 180.0 - cfg.tab_gap);
+        assert_eq!(h, cfg.height - cfg.tab_inset_y * 2.0);
+        assert_eq!(radius, cfg.tab_radius);
 
-        let (_, _, w, h, radius) = island_rect(0.0, 4.0);
+        let (_, _, w, h, radius) = island_rect(&cfg, 0.0, 4.0);
         assert_eq!(w, 0.0);
         assert_eq!(radius, 0.0);
         assert!(radius <= h / 2.0);
@@ -1613,7 +1683,13 @@ mod tests {
         let inactive_color = [0.5, 0.5, 0.5, 1.0];
         let active_color = [0.9, 0.9, 0.9, 1.0];
 
-        let island = Island::new(inactive_color, active_color, true, 240.0);
+        let island = Island::new(
+            IslandConfig::default(),
+            inactive_color,
+            active_color,
+            true,
+            240.0,
+        );
 
         assert_eq!(island.inactive_text_color, inactive_color);
         assert_eq!(island.active_text_color, active_color);
@@ -1622,13 +1698,24 @@ mod tests {
 
     #[test]
     fn test_island_height() {
-        let island =
-            Island::new([0.8, 0.8, 0.8, 1.0], [1.0, 1.0, 1.0, 1.0], false, 240.0);
-        assert_eq!(island.height(), ISLAND_HEIGHT);
+        let island = Island::new(
+            IslandConfig::default(),
+            [0.8, 0.8, 0.8, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            false,
+            240.0,
+        );
+        assert_eq!(island.height(), IslandConfig::default().height);
     }
 
     fn test_island() -> Island {
-        Island::new([0.5, 0.5, 0.5, 1.0], [0.9, 0.9, 0.9, 1.0], false, 240.0)
+        Island::new(
+            IslandConfig::default(),
+            [0.5, 0.5, 0.5, 1.0],
+            [0.9, 0.9, 0.9, 1.0],
+            false,
+            240.0,
+        )
     }
 
     #[test]
@@ -1821,13 +1908,14 @@ mod tests {
 
     #[test]
     fn tab_strip_layout_geometry() {
+        let cfg = IslandConfig::default();
         // 1000 physical px @ 2x scale → 500 logical px window. Slots
         // stay below the cap here, so the math matches the old
         // fill-the-strip layout.
-        let layout = tab_strip_layout(1000.0, 2.0, 4, 240.0);
+        let layout = tab_strip_layout(&cfg, 1000.0, 2.0, 4, 240.0);
         #[cfg(target_os = "macos")]
         {
-            assert_eq!(layout.left_margin, ISLAND_MARGIN_LEFT_MACOS);
+            assert_eq!(layout.left_margin, cfg.margin_left_macos);
             assert_eq!(layout.tab_width, (500.0 - 8.0 - 76.0) / 4.0);
             assert_eq!(layout.tabs_width, layout.tab_width * 4.0);
         }
@@ -1838,19 +1926,20 @@ mod tests {
             assert_eq!(layout.tabs_width, 492.0);
         }
         // Zero tabs clamps the divisor.
-        assert!(tab_strip_layout(1000.0, 2.0, 0, 240.0)
+        assert!(tab_strip_layout(&cfg, 1000.0, 2.0, 0, 240.0)
             .tab_width
             .is_finite());
     }
 
     #[test]
     fn tab_strip_layout_caps_slot_width() {
-        let layout = tab_strip_layout(3000.0, 2.0, 2, 240.0);
+        let cfg = IslandConfig::default();
+        let layout = tab_strip_layout(&cfg, 3000.0, 2.0, 2, 240.0);
         assert_eq!(layout.tab_width, 240.0);
         assert_eq!(layout.tabs_width, 480.0);
 
         // The cap is configurable via navigation.max-tab-width.
-        let layout = tab_strip_layout(3000.0, 2.0, 2, 280.0);
+        let layout = tab_strip_layout(&cfg, 3000.0, 2.0, 2, 280.0);
         assert_eq!(layout.tab_width, 280.0);
         assert_eq!(layout.tabs_width, 560.0);
         // The tabs region ends well before the 1500 logical px strip.
@@ -1858,7 +1947,7 @@ mod tests {
 
         // Pathologically narrow window: width clamps at 0 instead of
         // going negative.
-        let layout = tab_strip_layout(10.0, 2.0, 4, 240.0);
+        let layout = tab_strip_layout(&cfg, 10.0, 2.0, 4, 240.0);
         assert_eq!(layout.tab_width, 0.0);
         assert_eq!(layout.tabs_width, 0.0);
     }
@@ -1924,20 +2013,21 @@ mod tests {
 
     #[test]
     fn close_button_anchors_to_island_right_edge() {
+        let cfg = IslandConfig::default();
         // Full-width slot: slot 1 spans 180..360, island 183..354, so
-        // the button centers at 354 - CLOSE_MARGIN_RIGHT.
+        // the button centers at 354 - close-margin-right.
         let layout = TabStripLayout {
             left_margin: 0.0,
             tab_width: 180.0,
             tabs_width: 360.0,
         };
-        let cx = close_button_center_x(&layout, 1).unwrap();
+        let cx = close_button_center_x(&cfg, &layout, 1).unwrap();
         assert_eq!(
             cx,
-            180.0 + TAB_GAP / 2.0 + (180.0 - TAB_GAP) - CLOSE_MARGIN_RIGHT
+            180.0 + cfg.tab_gap / 2.0 + (180.0 - cfg.tab_gap) - cfg.close_margin_right
         );
         // The whole forgiving hit box stays inside the island.
-        assert!(cx + CLOSE_HIT_HALF_WIDTH <= 360.0 - TAB_GAP / 2.0);
+        assert!(cx + cfg.close_hit_half_width <= 360.0 - cfg.tab_gap / 2.0);
 
         // Narrow islands (many tabs) drop the button — no hit box, so
         // rendering and click handling agree via the shared helper.
@@ -1946,13 +2036,14 @@ mod tests {
             tab_width: 60.0,
             tabs_width: 600.0,
         };
-        assert_eq!(close_button_center_x(&narrow, 3), None);
+        assert_eq!(close_button_center_x(&cfg, &narrow, 3), None);
     }
 
     #[test]
     fn close_hit_box_clears_the_title_budget() {
+        let cfg = IslandConfig::default();
         // A max-width centered title on slot 0 ends at
-        // slot_right - TAB_PADDING_X; the close hit box must start at
+        // slot_right - tab-padding-x; the close hit box must start at
         // or after that point, or clicking visible title glyphs would
         // close the tab.
         let layout = TabStripLayout {
@@ -1960,9 +2051,9 @@ mod tests {
             tab_width: 180.0,
             tabs_width: 360.0,
         };
-        let cx = close_button_center_x(&layout, 0).unwrap();
-        let title_max_right = layout.tab_width - TAB_PADDING_X;
-        assert!(cx - CLOSE_HIT_HALF_WIDTH >= title_max_right);
+        let cx = close_button_center_x(&cfg, &layout, 0).unwrap();
+        let title_max_right = layout.tab_width - cfg.tab_padding_x;
+        assert!(cx - cfg.close_hit_half_width >= title_max_right);
     }
 
     #[test]
